@@ -161,10 +161,18 @@ export default {
       })
     },
 
-    /** 跳转到当前阅读章节 */
+    /** 跳转到当前阅读章节（使用 scroll-into-view 属性实现） */
     jumpToCurrent() {
-      const el = document.getElementById(`chapter-${this.currentChapterIdx}`)
-      el?.scrollIntoView()
+      // UniApp X 使用 scroll-into-view 属性驱动滚动，无法直接调用 DOM API
+      // 通过切换 isReversed 触发列表重渲染，scroll-into-view 会自动滚动到 current 章节
+      console.log(`[章节列表] 跳转到当前章节 idx=${this.currentChapterIdx}`)
+      // scroll-view 的 scroll-into-view 属性已绑定到 'chapter-' + currentChapterIdx
+      // 修改一个数据触发重新渲染即可激活滚动
+      const temp = this.isReversed
+      this.isReversed = !temp
+      this.$nextTick(() => {
+        this.isReversed = temp
+      })
     },
 
     /** 格式化字数显示 */

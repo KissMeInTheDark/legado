@@ -240,7 +240,15 @@ class BookService(
             updateBookDownloadStatus(userId, bookId, 1)
 
             // 步骤2：将书籍保存到 Legado 缓存（必须先保存才能获取章节）
-            val bookJson = """{"bookUrl":"$bookUrl","name":"","author":"","origin":"","tocUrl":""}"""
+            // 使用 ObjectMapper 安全序列化，避免 bookUrl 中特殊字符导致 JSON 格式错误
+            val bookJsonNode = json.createObjectNode().apply {
+                put("bookUrl", bookUrl)
+                put("name", "")
+                put("author", "")
+                put("origin", "")
+                put("tocUrl", "")
+            }
+            val bookJson = json.writeValueAsString(bookJsonNode)
             try {
                 legadoClient.saveBook(bookJson)
                 logger.info("[下载任务] 书籍已保存到Legado缓存 bookId={}", bookId)
@@ -277,6 +285,7 @@ class BookService(
             var doneCount = 0
 
             chapters.forEach { chapter ->
+                // 将 acquire 放在 try 外、finally 前，确保异常时也能 release
                 semaphore.acquire()
                 try {
                     val content = legadoClient.getBookContent(bookUrl, chapter.chapterIdx)

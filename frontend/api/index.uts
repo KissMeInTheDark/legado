@@ -70,10 +70,19 @@ async function request(method : string, path : string, data : any = null, isRetr
             const result = await request(method, path, data, true)
             resolve(result)
           } catch (e) {
-            // 刷新失败，跳转到登录
-            console.error('[API] Token 刷新失败，需要重新登录')
-            uni.reLaunch({ url: '/pages/index/index' })
-            reject(new Error('登录已过期'))
+            // 刷新失败，清除本地 Token 并提示用户重新进入（首页会自动重新登录）
+            console.error('[API] Token 刷新失败，清除本地Token')
+            uni.removeStorageSync('reader_token')
+            uni.removeStorageSync('reader_user_id')
+            uni.showModal({
+              title: '登录已过期',
+              content: '请重新进入应用',
+              showCancel: false,
+              success: () => {
+                // 重新登录而非 reLaunch（避免循环）
+                reject(new Error('登录已过期'))
+              }
+            })
           }
         } else {
           const errMsg = body?.message ?? '请求失败'

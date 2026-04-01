@@ -54,6 +54,7 @@ class LegadoClient(private val legadoProperties: LegadoProperties) {
 
         val results = mutableListOf<SearchBookResult>()
         val latch = CountDownLatch(1)
+        var connectionError: Throwable? = null  // 记录连接失败原因
 
         val request = buildRequest(wsUrl)
         val listener = object : WebSocketListener() {
@@ -84,6 +85,7 @@ class LegadoClient(private val legadoProperties: LegadoProperties) {
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 logger.error("[Legado搜索] WebSocket 连接失败 error={}", t.message)
+                connectionError = t  // 记录错误，让调用方可以区分超时和连接失败
                 latch.countDown()
             }
         }
@@ -95,6 +97,9 @@ class LegadoClient(private val legadoProperties: LegadoProperties) {
         if (!completed) {
             logger.warn("[Legado搜索] 搜索超时（{}秒），强制关闭连接，已收集{}条结果", timeoutSeconds, results.size)
             webSocket.close(1000, "search timeout")
+        } else if (connectionError != null && results.isEmpty()) {
+            // 连接失败且没有任何结果，抛出异常让调用方感知
+            throw RuntimeException("Legado WebSocket 连接失败: ${connectionError!!.message}", connectionError)
         }
 
         logger.info("[Legado搜索] 搜索完成 keyword={}, 结果数={}", keyword, results.size)

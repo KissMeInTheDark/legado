@@ -30,6 +30,5 @@ class AsyncConfig : AsyncConfigurer {
         return executor
     }
 
-    @Override
     override fun getAsyncExecutor(): Executor = downloadTaskExecutor()
 }

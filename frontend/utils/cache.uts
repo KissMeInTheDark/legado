@@ -93,15 +93,20 @@ function updateLruAccess(key : string) {
 }
 
 /**
- * 如果缓存超过限制，淘汰最旧的章节
+ * 如果缓存超过限制，淘汰最旧的章节（LRU 策略）
+ * 注意：淘汰时同时从 lru 数组中移除，避免数组无限增长
  */
 function evictIfNeeded(newKey : string) {
-  const lru = (uni.getStorageSync(CACHE_LRU_KEY) as string[]) ?? []
+  let lru = (uni.getStorageSync(CACHE_LRU_KEY) as string[]) ?? []
   if (!lru.includes(newKey) && lru.length >= MAX_CHAPTER_CACHE) {
-    // 淘汰最旧的（数组第一个）
-    const oldest = lru[0]
-    uni.removeStorageSync(oldest)
-    console.log(`[缓存] LRU淘汰 key=${oldest}`)
+    // 取出并移除最旧的（数组第一个）
+    const oldest = lru.shift()  // shift() 同时返回并移除第一个元素
+    if (oldest) {
+      uni.removeStorageSync(oldest)
+      console.log(`[缓存] LRU淘汰 key=${oldest}，剩余缓存数=${lru.length}`)
+      // 将更新后的 lru 数组写回存储（因为 shift 修改了数组）
+      uni.setStorageSync(CACHE_LRU_KEY, lru)
+    }
   }
 }
 
