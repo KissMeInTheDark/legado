@@ -1,0 +1,103 @@
+# Docker Compose 配置 - 小说阅读服务全套部署
+# 包含：Legado 服务端 + MySQL + Spring Boot 后端
+#
+# 使用方法：
+#   1. 复制 .env.example 为 .env 并填写配置
+#   2. 运行 docker-compose up -d
+version: '3.8'
+
+services:
+  # Legado 服务端（提供书源、搜索、章节抓取功能）
+  legado:
+    image: ghcr.io/gedoor/legado:latest
+    container_name: reader-legado
+    ports:
+      - "1234:1234"    # HTTP API 端口
+      - "1235:1235"    # WebSocket 端口（搜索）
+    volumes:
+      - legado-data:/legado/data    # 持久化书源和数据
+    restart: unless-stopped
+    networks:
+      - reader-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:1234/getBookSources"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # MySQL 数据库（存储用户书架、进度等业务数据）
+  mysql:
+    image: mysql:8.0
+    container_name: reader-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ReaderDB@2026}
+      MYSQL_DATABASE: reader_db
+      MYSQL_CHARSET: utf8mb4
+    volumes:
+      - mysql-data:/var/lib/mysql
+    ports:
+      - "3306:3306"    # 生产环境建议不暴露此端口
+    restart: unless-stopped
+    networks:
+      - reader-network
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-ReaderDB@2026}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Spring Boot 后端（小说阅读服务核心）
+  backend:
+    image: ${BACKEND_IMAGE:-reader-backend:latest}
+    container_name: reader-backend
+    depends_on:
+      mysql:
+        condition: service_healthy
+      legado:
+        condition: service_healthy
+    environment:
+      # 数据库配置
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/reader_db?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ReaderDB@2026}
+      # Legado 服务配置（容器内通信使用服务名）
+      LEGADO_BASE_URL: http://legado:1234
+      LEGADO_WS_URL: ws://legado:1235
+      LEGADO_USERNAME: ${LEGADO_USERNAME:-}
+      LEGADO_PASSWORD: ${LEGADO_PASSWORD:-}
+      # 阿里云 OSS 配置（必填）
+      ALIYUN_OSS_ENDPOINT: ${ALIYUN_OSS_ENDPOINT}
+      ALIYUN_OSS_ACCESS_KEY_ID: ${ALIYUN_OSS_ACCESS_KEY_ID}
+      ALIYUN_OSS_ACCESS_KEY_SECRET: ${ALIYUN_OSS_ACCESS_KEY_SECRET}
+      ALIYUN_OSS_BUCKET_NAME: ${ALIYUN_OSS_BUCKET_NAME}
+      ALIYUN_OSS_CDN_DOMAIN: ${ALIYUN_OSS_CDN_DOMAIN:-}
+      # JWT 配置
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-720}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - reader-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+networks:
+  reader-network:
+    driver: bridge
+
+volumes:
+  legado-data:
+  mysql-data:

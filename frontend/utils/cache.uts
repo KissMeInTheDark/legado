@@ -1,0 +1,185 @@
+/**
+ * 本地缓存工具
+ *
+ * 管理以下本地数据：
+ *  1. 章节列表（按书籍ID缓存，永久有效）
+ *  2. 章节内容（LRU 策略，最多缓存100章）
+ *  3. 阅读进度（本地进度，与服务端进度比较取较新的）
+ *  4. 搜索历史（最多20条）
+ */
+
+// 最大缓存章节数（超出后淘汰最旧的章节）
+const MAX_CHAPTER_CACHE = 100
+
+// 搜索历史最大条数
+const MAX_SEARCH_HISTORY = 20
+
+// ==================== 章节列表缓存 ====================
+
+/**
+ * 获取缓存的章节列表
+ * @param bookId 书籍ID
+ */
+export function getCachedChapterList(bookId : string) : any[] | null {
+  const key = `chapters_${bookId}`
+  const cached = uni.getStorageSync(key)
+  if (cached) {
+    console.log(`[缓存] 命中章节列表缓存 bookId=${bookId}`)
+    return cached as any[]
+  }
+  return null
+}
+
+/**
+ * 保存章节列表到本地缓存
+ * @param bookId 书籍ID
+ * @param chapters 章节列表
+ */
+export function cacheChapterList(bookId : string, chapters : any[]) {
+  const key = `chapters_${bookId}`
+  uni.setStorageSync(key, chapters)
+  console.log(`[缓存] 保存章节列表 bookId=${bookId}, count=${chapters.length}`)
+}
+
+// ==================== 章节内容缓存（LRU） ====================
+
+// 记录章节缓存Key的访问顺序（用于LRU淘汰）
+const CACHE_LRU_KEY = 'chapter_cache_lru'
+
+/**
+ * 获取缓存的章节内容
+ * @param bookId 书籍ID
+ * @param chapterIdx 章节索引
+ */
+export function getCachedChapterContent(bookId : string, chapterIdx : number) : string | null {
+  const key = `content_${bookId}_${chapterIdx}`
+  const content = uni.getStorageSync(key) as string
+  if (content) {
+    console.log(`[缓存] 命中章节内容缓存 bookId=${bookId}, idx=${chapterIdx}`)
+    // 更新 LRU 访问记录
+    updateLruAccess(key)
+    return content
+  }
+  return null
+}
+
+/**
+ * 保存章节内容到本地缓存（带 LRU 淘汰）
+ * @param bookId 书籍ID
+ * @param chapterIdx 章节索引
+ * @param content 章节正文
+ */
+export function cacheChapterContent(bookId : string, chapterIdx : number, content : string) {
+  const key = `content_${bookId}_${chapterIdx}`
+
+  // 检查是否需要淘汰旧缓存
+  evictIfNeeded(key)
+
+  uni.setStorageSync(key, content)
+  updateLruAccess(key)
+  console.log(`[缓存] 保存章节内容 bookId=${bookId}, idx=${chapterIdx}, length=${content.length}`)
+}
+
+/**
+ * 更新 LRU 访问记录（将 key 移到最近访问位置）
+ */
+function updateLruAccess(key : string) {
+  let lru = (uni.getStorageSync(CACHE_LRU_KEY) as string[]) ?? []
+  // 移除已有记录（去重）
+  lru = lru.filter((k : string) => k !== key)
+  // 添加到最近访问位置（数组末尾）
+  lru.push(key)
+  uni.setStorageSync(CACHE_LRU_KEY, lru)
+}
+
+/**
+ * 如果缓存超过限制，淘汰最旧的章节（LRU 策略）
+ * 注意：淘汰时同时从 lru 数组中移除，避免数组无限增长
+ */
+function evictIfNeeded(newKey : string) {
+  let lru = (uni.getStorageSync(CACHE_LRU_KEY) as string[]) ?? []
+  if (!lru.includes(newKey) && lru.length >= MAX_CHAPTER_CACHE) {
+    // 取出并移除最旧的（数组第一个）
+    const oldest = lru.shift()  // shift() 同时返回并移除第一个元素
+    if (oldest) {
+      uni.removeStorageSync(oldest)
+      console.log(`[缓存] LRU淘汰 key=${oldest}，剩余缓存数=${lru.length}`)
+      // 将更新后的 lru 数组写回存储（因为 shift 修改了数组）
+      uni.setStorageSync(CACHE_LRU_KEY, lru)
+    }
+  }
+}
+
+// ==================== 阅读进度缓存 ====================
+
+/**
+ * 保存本地阅读进度（立即写入，不依赖网络）
+ * @param bookId 书籍ID
+ * @param progress 进度对象
+ */
+export function saveLocalProgress(bookId : string, progress : any) {
+  const key = `progress_${bookId}`
+  progress.updatedAt = Date.now()
+  uni.setStorageSync(key, progress)
+}
+
+/**
+ * 获取本地阅读进度
+ * @param bookId 书籍ID
+ */
+export function getLocalProgress(bookId : string) : any | null {
+  const key = `progress_${bookId}`
+  return uni.getStorageSync(key)
+}
+
+/**
+ * 合并本地进度和服务端进度，取较新的
+ * @param localProgress 本地进度
+ * @param serverProgress 服务端进度
+ */
+export function mergeProgress(localProgress : any | null, serverProgress : any | null) : any {
+  if (!localProgress && !serverProgress) {
+    return { durChapterIndex: 0, durChapterPos: 0, durChapterTitle: null }
+  }
+  if (!localProgress) return serverProgress
+  if (!serverProgress) return localProgress
+
+  // 比较更新时间，取较新的
+  const localTime = localProgress.updatedAt ?? 0
+  const serverTime = new Date(serverProgress.lastReadAt ?? 0).getTime()
+  console.log(`[进度合并] 本地时间=${localTime}, 服务端时间=${serverTime}`)
+  return localTime >= serverTime ? localProgress : serverProgress
+}
+
+// ==================== 搜索历史 ====================
+
+/**
+ * 获取搜索历史
+ */
+export function getSearchHistory() : string[] {
+  return (uni.getStorageSync('search_history') as string[]) ?? []
+}
+
+/**
+ * 添加搜索记录
+ * @param keyword 搜索关键词
+ */
+export function addSearchHistory(keyword : string) {
+  if (!keyword.trim()) return
+  let history = getSearchHistory()
+  // 去重并置顶
+  history = history.filter((k : string) => k !== keyword)
+  history.unshift(keyword)
+  // 最多保留 MAX_SEARCH_HISTORY 条
+  if (history.length > MAX_SEARCH_HISTORY) {
+    history = history.slice(0, MAX_SEARCH_HISTORY)
+  }
+  uni.setStorageSync('search_history', history)
+}
+
+/**
+ * 清空搜索历史
+ */
+export function clearSearchHistory() {
+  uni.setStorageSync('search_history', [])
+}
