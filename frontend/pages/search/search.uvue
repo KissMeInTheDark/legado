@@ -1,0 +1,475 @@
+<template>
+  <!-- 搜索页面 - 搜索书籍并展示结果 -->
+  <view class="search-page">
+
+    <!-- 搜索输入框 -->
+    <view class="search-bar">
+      <view class="search-input-wrap">
+        <text class="search-icon">🔍</text>
+        <input
+          class="search-input"
+          v-model="keyword"
+          placeholder="输入书名或作者搜索"
+          placeholder-style="color: #666"
+          confirm-type="search"
+          @confirm="doSearch"
+        />
+        <text v-if="keyword" class="clear-btn" @click="clearKeyword">✕</text>
+      </view>
+      <text class="search-btn-text" @click="doSearch">搜索</text>
+    </view>
+
+    <!-- 搜索历史（无搜索结果时显示） -->
+    <view v-if="!searching && searchResults.length === 0 && !hasSearched" class="history-section">
+      <view class="section-header">
+        <text class="section-title">搜索历史</text>
+        <text class="clear-history" @click="clearHistory">清空</text>
+      </view>
+      <view class="history-tags">
+        <text
+          v-for="(item, idx) in searchHistory"
+          :key="idx"
+          class="history-tag"
+          @click="onHistoryClick(item)"
+        >{{ item }}</text>
+      </view>
+    </view>
+
+    <!-- 搜索中加载动画 -->
+    <view v-if="searching" class="searching-status">
+      <view class="loading-dots">
+        <view class="dot" /><view class="dot" /><view class="dot" />
+      </view>
+      <text class="searching-text">正在从书源搜索《{{ keyword }}》...</text>
+      <text class="searching-sub">搜索可能需要15秒，请耐心等待</text>
+    </view>
+
+    <!-- 无结果提示 -->
+    <view v-if="hasSearched && !searching && searchResults.length === 0" class="no-result">
+      <text class="no-result-icon">😔</text>
+      <text class="no-result-text">没有找到相关书籍</text>
+      <text class="no-result-sub">换个关键词试试</text>
+    </view>
+
+    <!-- 搜索结果列表 -->
+    <scroll-view v-if="searchResults.length > 0" class="result-list" scroll-y>
+      <view class="result-count">
+        <text class="result-count-text">共找到 {{ searchResults.length }} 本相关书籍</text>
+      </view>
+      <view
+        v-for="book in searchResults"
+        :key="book.bookUrl"
+        class="result-item"
+        @click="onBookClick(book)"
+      >
+        <!-- 封面 -->
+        <image
+          class="result-cover"
+          :src="book.coverUrl || '/static/default-cover.png'"
+          mode="aspectFill"
+        />
+        <!-- 书籍信息 -->
+        <view class="result-info">
+          <text class="result-name">{{ book.bookName }}</text>
+          <text class="result-author">{{ book.author }}</text>
+          <text class="result-source">来源：{{ book.originName || '未知书源' }}</text>
+          <text class="result-intro" :numberOfLines="2">{{ book.intro || '暂无简介' }}</text>
+          <view class="result-meta">
+            <text v-if="book.kind" class="result-tag">{{ book.kind }}</text>
+            <text v-if="book.latestChapterTitle" class="result-latest">最新：{{ book.latestChapterTitle }}</text>
+          </view>
+        </view>
+        <!-- 阅读按钮 -->
+        <view class="result-actions">
+          <button class="read-btn" @click.stop="onReadClick(book)">阅读</button>
+        </view>
+      </view>
+    </scroll-view>
+
+    <!-- 加入书架确认弹窗（等待下载完成） -->
+    <view v-if="addingBook" class="adding-overlay">
+      <view class="adding-card">
+        <text class="adding-title">正在准备《{{ addingBook.bookName }}》</text>
+        <view class="progress-bar-wrap">
+          <view class="progress-bar" :style="{ width: downloadPercent + '%' }" />
+        </view>
+        <text class="adding-progress">
+          {{ downloadDone }} / {{ downloadTotal }} 章节已准备
+        </text>
+        <text class="adding-tip">首次加载需要下载章节，请稍候...</text>
+        <button class="cancel-btn" @click="cancelAdding">取消</button>
+      </view>
+    </view>
+
+  </view>
+</template>
+
+<script lang="uts">
+import { searchBooks, addBook, getDownloadStatus } from '@/api/index.uts'
+import { getSearchHistory, addSearchHistory, clearSearchHistory } from '@/utils/cache.uts'
+
+export default {
+  data() {
+    return {
+      keyword: '',                    // 搜索关键词
+      searchResults: [] as any[],     // 搜索结果
+      searchHistory: [] as string[],  // 搜索历史
+      searching: false,               // 搜索加载状态
+      hasSearched: false,             // 是否已搜索过
+      addingBook: null as any,        // 正在加入书架的书籍
+      downloadPercent: 0,             // 下载进度（百分比）
+      downloadDone: 0,
+      downloadTotal: 0,
+      pollTimer: null as any,         // 轮询定时器
+    }
+  },
+
+  onLoad() {
+    // 加载搜索历史
+    this.searchHistory = getSearchHistory()
+  },
+
+  onUnload() {
+    // 页面卸载时清理定时器
+    this.clearPollTimer()
+  },
+
+  methods: {
+    /** 执行搜索 */
+    async doSearch() {
+      if (!this.keyword.trim()) {
+        uni.showToast({ title: '请输入搜索关键词', icon: 'none' })
+        return
+      }
+
+      console.log(`[搜索] 开始搜索 keyword=${this.keyword}`)
+      this.searching = true
+      this.hasSearched = true
+      this.searchResults = []
+
+      // 记录搜索历史
+      addSearchHistory(this.keyword)
+      this.searchHistory = getSearchHistory()
+
+      try {
+        const data = await searchBooks(this.keyword, 15)
+        this.searchResults = data.list ?? []
+        console.log(`[搜索] 搜索完成，结果数=${this.searchResults.length}`)
+      } catch (e : any) {
+        console.error('[搜索] 搜索失败', e.message)
+      } finally {
+        this.searching = false
+      }
+    },
+
+    /** 点击搜索历史记录 */
+    onHistoryClick(item : string) {
+      this.keyword = item
+      this.doSearch()
+    },
+
+    /** 清空搜索关键词 */
+    clearKeyword() {
+      this.keyword = ''
+      this.searchResults = []
+      this.hasSearched = false
+    },
+
+    /** 清空搜索历史 */
+    clearHistory() {
+      clearSearchHistory()
+      this.searchHistory = []
+    },
+
+    /** 点击书籍行（查看详情或直接阅读） */
+    onBookClick(book : any) {
+      // 简化流程：直接触发阅读
+      this.onReadClick(book)
+    },
+
+    /**
+     * 点击「阅读」按钮
+     * 流程：将书籍加入书架 → 轮询下载进度 → 完成后跳转阅读器
+     */
+    async onReadClick(book : any) {
+      console.log(`[搜索] 点击阅读 bookName=${book.bookName}`)
+
+      try {
+        // 加入书架（触发后台下载）
+        const result = await addBook({
+          bookUrl: book.bookUrl,
+          bookName: book.bookName,
+          author: book.author,
+          coverUrl: book.coverUrl,
+          intro: book.intro,
+          kind: book.kind,
+          origin: book.origin,
+          originName: book.originName
+        })
+
+        console.log(`[搜索] 加入书架成功 bookId=${result.bookId}, status=${result.downloadStatus}`)
+
+        // 如果已下载完成，直接跳转
+        if (result.downloadStatus === 2) {
+          this.goToReader(result.bookId, book.bookName, 0)
+          return
+        }
+
+        // 显示下载进度弹窗
+        this.addingBook = { ...book, bookId: result.bookId }
+        this.downloadPercent = 0
+        this.downloadDone = 0
+        this.downloadTotal = 0
+
+        // 开始轮询下载进度（每2秒查询一次）
+        this.startPollDownload(result.bookId, book.bookName)
+
+      } catch (e : any) {
+        console.error('[搜索] 加入书架失败', e.message)
+      }
+    },
+
+    /** 开始轮询下载进度 */
+    startPollDownload(bookId : string, bookName : string) {
+      this.clearPollTimer()
+      this.pollTimer = setInterval(async () => {
+        try {
+          const status = await getDownloadStatus(bookId)
+          this.downloadDone = status.doneChapters
+          this.downloadTotal = status.totalChapters
+          this.downloadPercent = status.percent
+
+          console.log(`[搜索] 下载进度 bookId=${bookId}, ${this.downloadDone}/${this.downloadTotal}`)
+
+          if (status.downloadStatus === 2) {
+            // 下载完成
+            this.clearPollTimer()
+            this.addingBook = null
+            uni.showToast({ title: '下载完成！', icon: 'success' })
+            setTimeout(() => {
+              this.goToReader(bookId, bookName, 0)
+            }, 500)
+          } else if (status.downloadStatus === 3) {
+            // 下载失败
+            this.clearPollTimer()
+            this.addingBook = null
+            uni.showToast({ title: '下载失败，请重试', icon: 'error' })
+          }
+        } catch (e : any) {
+          console.error('[搜索] 查询下载进度失败', e.message)
+        }
+      }, 2000)
+    },
+
+    /** 取消等待下载 */
+    cancelAdding() {
+      this.clearPollTimer()
+      this.addingBook = null
+      // 提示用户可在书架查看下载进度
+      uni.showToast({ title: '书籍已加入书架，可稍后继续', icon: 'none' })
+    },
+
+    /** 清理轮询定时器 */
+    clearPollTimer() {
+      if (this.pollTimer) {
+        clearInterval(this.pollTimer)
+        this.pollTimer = null
+      }
+    },
+
+    /** 跳转到阅读器 */
+    goToReader(bookId : string, bookName : string, startChapter : number) {
+      uni.navigateTo({
+        url: `/pages/reader/reader?bookId=${bookId}&bookName=${encodeURIComponent(bookName)}&chapterIdx=${startChapter}`
+      })
+    }
+  }
+}
+</script>
+
+<style>
+.search-page {
+  background-color: #0f0f23;
+  min-height: 100vh;
+}
+
+/* 搜索栏 */
+.search-bar {
+  display: flex;
+  align-items: center;
+  padding: 20rpx 24rpx;
+  background-color: #1a1a2e;
+  border-bottom: 1rpx solid #2d2d4a;
+}
+
+.search-input-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  background: #0f0f23;
+  border-radius: 50rpx;
+  padding: 14rpx 24rpx;
+}
+
+.search-icon { font-size: 28rpx; margin-right: 12rpx; }
+.search-input { flex: 1; color: #fff; font-size: 28rpx; }
+.clear-btn { color: #888; font-size: 24rpx; padding: 0 8rpx; }
+.search-btn-text { color: #e94560; font-size: 28rpx; margin-left: 24rpx; }
+
+/* 搜索历史 */
+.history-section { padding: 30rpx; }
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 20rpx;
+}
+.section-title { color: #ccc; font-size: 28rpx; font-weight: bold; }
+.clear-history { color: #888; font-size: 24rpx; }
+.history-tags { display: flex; flex-wrap: wrap; gap: 16rpx; }
+.history-tag {
+  background: #2d2d4a;
+  color: #ccc;
+  padding: 10rpx 24rpx;
+  border-radius: 30rpx;
+  font-size: 24rpx;
+}
+
+/* 搜索中状态 */
+.searching-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 80rpx 40rpx;
+}
+.loading-dots {
+  display: flex;
+  gap: 12rpx;
+  margin-bottom: 30rpx;
+}
+.dot {
+  width: 16rpx;
+  height: 16rpx;
+  border-radius: 50%;
+  background: #e94560;
+  animation: dot-bounce 1.4s ease-in-out infinite;
+}
+.dot:nth-child(2) { animation-delay: 0.2s; }
+.dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot-bounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.6; }
+  40% { transform: scale(1); opacity: 1; }
+}
+.searching-text { color: #ccc; font-size: 28rpx; text-align: center; }
+.searching-sub { color: #888; font-size: 22rpx; margin-top: 16rpx; }
+
+/* 无结果 */
+.no-result {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 120rpx 40rpx;
+}
+.no-result-icon { font-size: 80rpx; }
+.no-result-text { color: #ccc; font-size: 32rpx; margin-top: 20rpx; }
+.no-result-sub { color: #888; font-size: 24rpx; margin-top: 12rpx; }
+
+/* 结果列表 */
+.result-list { height: calc(100vh - 100rpx); }
+.result-count { padding: 20rpx 24rpx; }
+.result-count-text { color: #888; font-size: 24rpx; }
+
+.result-item {
+  display: flex;
+  padding: 24rpx;
+  border-bottom: 1rpx solid #1a1a2e;
+  background: #0f0f23;
+}
+
+.result-cover {
+  width: 120rpx;
+  height: 168rpx;
+  border-radius: 8rpx;
+  flex-shrink: 0;
+}
+
+.result-info {
+  flex: 1;
+  padding: 0 20rpx;
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
+}
+
+.result-name { color: #fff; font-size: 30rpx; font-weight: bold; }
+.result-author { color: #aaa; font-size: 24rpx; }
+.result-source { color: #e94560; font-size: 22rpx; }
+.result-intro { color: #888; font-size: 22rpx; line-height: 1.5; }
+.result-meta { display: flex; gap: 12rpx; align-items: center; margin-top: 4rpx; }
+.result-tag {
+  background: #2d2d4a;
+  color: #ccc;
+  padding: 4rpx 12rpx;
+  border-radius: 4rpx;
+  font-size: 20rpx;
+}
+.result-latest { color: #888; font-size: 20rpx; }
+
+.result-actions { display: flex; align-items: center; }
+.read-btn {
+  background: #e94560;
+  color: #fff;
+  border-radius: 50rpx;
+  padding: 14rpx 30rpx;
+  font-size: 24rpx;
+  border: none;
+}
+
+/* 加入书架弹窗 */
+.adding-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.adding-card {
+  background: #1a1a2e;
+  border-radius: 20rpx;
+  padding: 50rpx 40rpx;
+  width: 80%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24rpx;
+}
+
+.adding-title { color: #fff; font-size: 30rpx; font-weight: bold; text-align: center; }
+
+.progress-bar-wrap {
+  width: 100%;
+  height: 12rpx;
+  background: #2d2d4a;
+  border-radius: 6rpx;
+  overflow: hidden;
+}
+.progress-bar {
+  height: 100%;
+  background: #e94560;
+  border-radius: 6rpx;
+  transition: width 0.3s ease;
+}
+
+.adding-progress { color: #ccc; font-size: 26rpx; }
+.adding-tip { color: #888; font-size: 22rpx; text-align: center; }
+.cancel-btn {
+  background: transparent;
+  color: #888;
+  border: 1rpx solid #888;
+  border-radius: 50rpx;
+  padding: 14rpx 50rpx;
+  font-size: 26rpx;
+}
+</style>

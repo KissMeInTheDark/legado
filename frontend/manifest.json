@@ -1,0 +1,20 @@
+{
+  "name": "小说阅读",
+  "appid": "__UNI__READER001",
+  "description": "基于 Legado 的小说阅读前端（UniApp X）",
+  "versionName": "1.0.0",
+  "versionCode": "100",
+  "transformPx": false,
+  "app": {
+    "distribute": {
+      "android": {
+        "permissions": [
+          "<uses-permission android:name=\"android.permission.INTERNET\"/>",
+          "<uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\"/>",
+          "<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"/>"
+        ]
+      },
+      "ios": {}
+    }
+  }
+}

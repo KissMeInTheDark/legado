@@ -1,0 +1,362 @@
+<template>
+  <!-- 书架页面 - 展示用户的所有书籍（仿 Legado 移动端网格布局） -->
+  <view class="bookshelf-page">
+
+    <!-- 顶部操作栏 -->
+    <view class="header">
+      <text class="header-title">我的书架</text>
+      <view class="header-actions">
+        <!-- 长按模式下的删除按钮 -->
+        <text v-if="editMode" class="header-btn" @click="exitEditMode">完成</text>
+        <text v-else class="header-btn" @click="goSearch">搜索</text>
+      </view>
+    </view>
+
+    <!-- 下拉刷新提示 -->
+    <view v-if="refreshing" class="refresh-tip">
+      <text class="refresh-text">正在刷新...</text>
+    </view>
+
+    <!-- 空书架提示 -->
+    <view v-if="!loading && bookList.length === 0" class="empty-shelf">
+      <text class="empty-icon">📚</text>
+      <text class="empty-text">书架空空如也</text>
+      <text class="empty-sub">去搜索你喜欢的书吧</text>
+      <button class="go-search-btn" @click="goSearch">去搜索</button>
+    </view>
+
+    <!-- 书籍网格列表（3列，仿 Legado 风格） -->
+    <scroll-view v-else class="book-grid" scroll-y @scrolltolower="onScrollBottom" refresher-enabled @refresherrefresh="onRefresh" :refresher-triggered="refreshing">
+      <view class="grid-container">
+        <view
+          v-for="book in bookList"
+          :key="book.bookId"
+          class="book-item"
+          @click="onBookClick(book)"
+          @longpress="onBookLongPress(book)"
+        >
+          <!-- 书籍封面 -->
+          <view class="cover-wrapper">
+            <image
+              class="book-cover"
+              :src="book.coverOssUrl || '/static/default-cover.png'"
+              mode="aspectFill"
+            />
+            <!-- 下载进度遮罩（仅下载中时显示） -->
+            <view v-if="book.downloadStatus === 1" class="downloading-mask">
+              <text class="downloading-text">下载中...</text>
+            </view>
+            <!-- 编辑模式的删除按钮 -->
+            <view v-if="editMode" class="delete-btn" @click.stop="removeBook(book)">
+              <text class="delete-icon">✕</text>
+            </view>
+          </view>
+
+          <!-- 书名和进度信息 -->
+          <view class="book-info">
+            <text class="book-name" :numberOfLines="2">{{ book.bookName }}</text>
+            <text class="book-progress" v-if="book.readingProgress">
+              读至第{{ book.readingProgress.durChapterIndex + 1 }}章
+            </text>
+            <text class="book-progress" v-else>未开始阅读</text>
+          </view>
+        </view>
+      </view>
+    </scroll-view>
+
+    <!-- 加载中骨架屏 -->
+    <view v-if="loading" class="skeleton-container">
+      <view v-for="i in 6" :key="i" class="skeleton-item">
+        <view class="skeleton-cover" />
+        <view class="skeleton-title" />
+      </view>
+    </view>
+
+  </view>
+</template>
+
+<script lang="uts">
+import { login, getBookshelf, removeBook as apiRemoveBook } from '@/api/index.uts'
+import { getLocalProgress } from '@/utils/cache.uts'
+
+export default {
+  data() {
+    return {
+      bookList: [] as any[],    // 书架书籍列表
+      loading: true,            // 初始加载状态
+      refreshing: false,        // 下拉刷新状态
+      editMode: false,          // 编辑模式（长按进入）
+    }
+  },
+
+  async onLoad() {
+    // 页面加载时初始化（确保 Token 有效）
+    await this.ensureLogin()
+    await this.loadBookshelf()
+  },
+
+  async onShow() {
+    // 每次显示时刷新书架（从搜索/阅读返回后更新进度显示）
+    if (!this.loading) {
+      await this.loadBookshelf()
+    }
+  },
+
+  methods: {
+    /**
+     * 确保用户已登录（Token 存在）
+     * 没有 Token 时自动用设备ID静默登录
+     */
+    async ensureLogin() {
+      const token = uni.getStorageSync('reader_token')
+      if (!token) {
+        console.log('[书架] 无Token，自动登录')
+        try {
+          // 获取设备ID
+          const deviceInfo = uni.getDeviceInfo()
+          const deviceId = deviceInfo.deviceId ?? `device_${Date.now()}`
+          await login(deviceId)
+          console.log('[书架] 自动登录成功')
+        } catch (e : any) {
+          console.error('[书架] 自动登录失败', e.message)
+          uni.showToast({ title: '登录失败，请重试', icon: 'error' })
+        }
+      }
+    },
+
+    /**
+     * 加载书架列表（含阅读进度）
+     */
+    async loadBookshelf() {
+      console.log('[书架] 加载书架数据')
+      try {
+        const data = await getBookshelf()
+        this.bookList = data.list ?? []
+        console.log(`[书架] 加载完成，共 ${this.bookList.length} 本书`)
+      } catch (e : any) {
+        console.error('[书架] 加载书架失败', e.message)
+      } finally {
+        this.loading = false
+        this.refreshing = false
+      }
+    },
+
+    /** 下拉刷新 */
+    async onRefresh() {
+      this.refreshing = true
+      await this.loadBookshelf()
+    },
+
+    /** 点击书籍 - 打开阅读器 */
+    onBookClick(book : any) {
+      if (this.editMode) return
+      if (book.downloadStatus === 1) {
+        uni.showToast({ title: '书籍下载中，请稍候...', icon: 'none' })
+        return
+      }
+      // 获取本地缓存进度（可能比服务端更新）
+      const localProgress = getLocalProgress(book.bookId)
+      const progress = localProgress ?? book.readingProgress
+      const startChapter = progress?.durChapterIndex ?? 0
+
+      console.log(`[书架] 打开书籍 bookId=${book.bookId}, 从第${startChapter}章开始`)
+      uni.navigateTo({
+        url: `/pages/reader/reader?bookId=${book.bookId}&bookName=${encodeURIComponent(book.bookName)}&chapterIdx=${startChapter}&totalChapters=${book.totalChapters}`
+      })
+    },
+
+    /** 长按书籍 - 进入编辑模式 */
+    onBookLongPress(_book : any) {
+      this.editMode = true
+      uni.vibrateShort({ type: 'light' })
+    },
+
+    /** 退出编辑模式 */
+    exitEditMode() {
+      this.editMode = false
+    },
+
+    /** 跳转到搜索页 */
+    goSearch() {
+      uni.switchTab({ url: '/pages/search/search' })
+    },
+
+    /** 移除书籍（带确认弹框） */
+    removeBook(book : any) {
+      uni.showModal({
+        title: '移除书籍',
+        content: `确定要从书架移除《${book.bookName}》吗？`,
+        success: async (res : any) => {
+          if (res.confirm) {
+            try {
+              await apiRemoveBook(book.bookId)
+              this.bookList = this.bookList.filter((b : any) => b.bookId !== book.bookId)
+              uni.showToast({ title: '已移除', icon: 'success' })
+              console.log(`[书架] 移除书籍 bookId=${book.bookId}`)
+            } catch (e : any) {
+              console.error('[书架] 移除失败', e.message)
+            }
+          }
+        }
+      })
+    },
+
+    /** 滚动到底部（预留扩展） */
+    onScrollBottom() {
+      // 当前版本一次性加载所有书籍，无需分页
+    }
+  }
+}
+</script>
+
+<style>
+/* 书架页面样式 - 深色主题（仿 Legado 风格） */
+.bookshelf-page {
+  background-color: #0f0f23;
+  min-height: 100vh;
+  padding-bottom: 100rpx;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20rpx 30rpx;
+  background-color: #1a1a2e;
+  border-bottom: 1rpx solid #2d2d4a;
+}
+
+.header-title {
+  font-size: 36rpx;
+  font-weight: bold;
+  color: #ffffff;
+}
+
+.header-btn {
+  color: #e94560;
+  font-size: 28rpx;
+}
+
+.refresh-tip {
+  text-align: center;
+  padding: 20rpx;
+}
+
+.refresh-text {
+  color: #888;
+  font-size: 24rpx;
+}
+
+/* 空书架 */
+.empty-shelf {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin-top: 200rpx;
+}
+
+.empty-icon { font-size: 100rpx; }
+.empty-text { font-size: 36rpx; color: #ccc; margin-top: 30rpx; }
+.empty-sub { font-size: 26rpx; color: #888; margin-top: 16rpx; }
+.go-search-btn {
+  margin-top: 40rpx;
+  background-color: #e94560;
+  color: #fff;
+  border-radius: 50rpx;
+  padding: 20rpx 80rpx;
+  font-size: 28rpx;
+}
+
+/* 书籍网格 */
+.book-grid { height: calc(100vh - 100rpx); }
+.grid-container {
+  display: flex;
+  flex-wrap: wrap;
+  padding: 20rpx 16rpx;
+}
+
+.book-item {
+  width: 33.33%;
+  padding: 10rpx;
+  box-sizing: border-box;
+}
+
+.cover-wrapper {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 0.7;
+  border-radius: 8rpx;
+  overflow: hidden;
+}
+
+.book-cover {
+  width: 100%;
+  height: 100%;
+  border-radius: 8rpx;
+}
+
+.downloading-mask {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(0,0,0,0.6);
+  padding: 8rpx;
+  text-align: center;
+}
+
+.downloading-text { color: #fff; font-size: 20rpx; }
+
+.delete-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  background: rgba(233, 69, 96, 0.9);
+  width: 44rpx;
+  height: 44rpx;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.delete-icon { color: #fff; font-size: 24rpx; }
+
+.book-info { margin-top: 10rpx; }
+.book-name { font-size: 24rpx; color: #eee; line-height: 1.4; }
+.book-progress { font-size: 20rpx; color: #888; margin-top: 4rpx; }
+
+/* 骨架屏 */
+.skeleton-container {
+  display: flex;
+  flex-wrap: wrap;
+  padding: 20rpx 16rpx;
+}
+
+.skeleton-item {
+  width: 33.33%;
+  padding: 10rpx;
+}
+
+.skeleton-cover {
+  width: 100%;
+  aspect-ratio: 0.7;
+  background: #2d2d4a;
+  border-radius: 8rpx;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+.skeleton-title {
+  height: 28rpx;
+  background: #2d2d4a;
+  border-radius: 4rpx;
+  margin-top: 10rpx;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+</style>

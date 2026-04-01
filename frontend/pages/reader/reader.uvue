@@ -1,0 +1,566 @@
+<template>
+  <!-- 阅读器页面 - 核心阅读功能，支持翻页和进度同步 -->
+  <view
+    class="reader-page"
+    :style="{ backgroundColor: bgColor, fontSize: fontSize + 'rpx' }"
+    @click="toggleMenu"
+  >
+
+    <!-- 顶部菜单（点击页面显示/隐藏） -->
+    <view :class="['top-bar', { visible: menuVisible }]">
+      <view class="top-bar-inner">
+        <text class="back-btn" @click.stop="goBack">← 返回</text>
+        <text class="chapter-title-top" :numberOfLines="1">{{ currentTitle }}</text>
+        <text class="chapter-list-btn" @click.stop="goChapterList">目录</text>
+      </view>
+    </view>
+
+    <!-- 章节内容区域 -->
+    <scroll-view
+      class="content-scroll"
+      scroll-y
+      :scroll-top="scrollTop"
+      @scroll="onScroll"
+      @scrolltolower="onScrollToBottom"
+    >
+      <!-- 加载状态 -->
+      <view v-if="loading" class="content-loading">
+        <view class="loading-spinner" />
+        <text class="loading-text">加载章节内容...</text>
+      </view>
+
+      <!-- 章节正文 -->
+      <view v-else class="content-text">
+        <!-- 章节标题 -->
+        <text class="content-chapter-title">{{ currentTitle }}</text>
+        <!-- 正文段落 -->
+        <text
+          v-for="(para, idx) in paragraphs"
+          :key="idx"
+          class="paragraph"
+        >{{ para }}</text>
+      </view>
+
+      <!-- 底部翻页提示 -->
+      <view v-if="!loading && nextChapterIdx !== null" class="next-chapter-hint">
+        <text class="hint-text" @click="goNextChapter">下一章：{{ nextTitle }}</text>
+      </view>
+      <view v-if="!loading && nextChapterIdx === null" class="book-end">
+        <text class="end-text">📖 本书已完结</text>
+      </view>
+    </scroll-view>
+
+    <!-- 底部菜单（点击页面显示/隐藏） -->
+    <view :class="['bottom-bar', { visible: menuVisible }]">
+      <!-- 上一章 / 下一章 -->
+      <view class="nav-btns">
+        <text
+          :class="['nav-btn', { disabled: prevChapterIdx === null }]"
+          @click.stop="goPrevChapter"
+        >上一章</text>
+        <text class="chapter-progress">{{ currentChapterIdx + 1 }} / {{ totalChapters }}</text>
+        <text
+          :class="['nav-btn', { disabled: nextChapterIdx === null }]"
+          @click.stop="goNextChapter"
+        >下一章</text>
+      </view>
+
+      <!-- 设置栏 -->
+      <view class="settings-row">
+        <!-- 字体大小调整 -->
+        <text class="setting-btn" @click.stop="changeFontSize(-4)">A-</text>
+        <text class="setting-btn" @click.stop="changeFontSize(4)">A+</text>
+        <!-- 背景色切换 -->
+        <view
+          v-for="bg in bgOptions"
+          :key="bg.color"
+          :class="['bg-option', { active: bgColor === bg.color }]"
+          :style="{ backgroundColor: bg.color }"
+          @click.stop="bgColor = bg.color"
+        />
+      </view>
+    </view>
+
+  </view>
+</template>
+
+<script lang="uts">
+import { getChapterUrl, getBatchChapterUrls, reportProgress, getProgress, downloadChapterContent } from '@/api/index.uts'
+import { getCachedChapterContent, cacheChapterContent, saveLocalProgress, getLocalProgress, mergeProgress } from '@/utils/cache.uts'
+
+// 进度上报节流时间（30秒）
+const PROGRESS_REPORT_INTERVAL = 30_000
+
+export default {
+  data() {
+    return {
+      bookId: '',
+      bookName: '',
+      currentChapterIdx: 0,
+      totalChapters: 0,
+
+      // 内容相关
+      content: '',
+      currentTitle: '',
+      paragraphs: [] as string[],
+      loading: true,
+
+      // 上下章信息
+      prevChapterIdx: null as number | null,
+      nextChapterIdx: null as number | null,
+      nextTitle: '',
+
+      // 滚动位置
+      scrollTop: 0,
+      currentScrollTop: 0,
+
+      // 菜单显示
+      menuVisible: false,
+
+      // 阅读设置
+      fontSize: 32,               // rpx
+      bgColor: '#0f0f23',         // 背景色
+      bgOptions: [
+        { color: '#0f0f23' },     // 深色
+        { color: '#1a120b' },     // 暖棕色
+        { color: '#f5f5dc' },     // 米白色
+        { color: '#ffffff' },     // 纯白
+      ],
+
+      // 进度上报
+      lastReportTime: 0,          // 上次上报时间戳
+      sessionReadTime: 0,         // 本次阅读时长（秒）
+      readTimer: null as any,     // 阅读时长计时器
+    }
+  },
+
+  onLoad(options : any) {
+    this.bookId = options.bookId ?? ''
+    this.bookName = decodeURIComponent(options.bookName ?? '')
+    this.currentChapterIdx = parseInt(options.chapterIdx ?? '0')
+    this.totalChapters = parseInt(options.totalChapters ?? '0')
+
+    console.log(`[阅读器] 打开 bookId=${this.bookId}, chapterIdx=${this.currentChapterIdx}`)
+
+    this.initReader()
+  },
+
+  onHide() {
+    // App 进入后台时立即上报进度
+    console.log('[阅读器] App进入后台，立即上报进度')
+    this.reportProgressNow()
+    this.stopReadTimer()
+  },
+
+  onShow() {
+    this.startReadTimer()
+  },
+
+  onUnload() {
+    // 退出阅读器时立即上报进度
+    console.log('[阅读器] 退出阅读器，上报进度')
+    this.reportProgressNow()
+    this.stopReadTimer()
+  },
+
+  methods: {
+    /** 初始化阅读器（同步服务端进度，加载章节） */
+    async initReader() {
+      // 同步服务端进度（与本地进度取较新的）
+      await this.syncProgress()
+
+      // 加载当前章节内容
+      await this.loadChapter(this.currentChapterIdx)
+
+      // 开始计时
+      this.startReadTimer()
+    },
+
+    /**
+     * 同步阅读进度
+     * 从服务端获取进度，与本地进度合并，取较新的
+     */
+    async syncProgress() {
+      try {
+        const serverProgress = await getProgress(this.bookId)
+        const localProgress = getLocalProgress(this.bookId)
+        const merged = mergeProgress(localProgress, serverProgress)
+
+        console.log(`[阅读器] 合并进度 chapterIdx=${merged.durChapterIndex}`)
+        this.currentChapterIdx = merged.durChapterIndex ?? this.currentChapterIdx
+        this.scrollTop = merged.durChapterPos ?? 0
+      } catch (e : any) {
+        console.warn('[阅读器] 同步进度失败，使用本地进度', e.message)
+      }
+    },
+
+    /**
+     * 加载章节内容
+     * 优先读取本地缓存，缓存无则请求服务端获取 OSS URL，再从 OSS 下载
+     *
+     * @param chapterIdx 章节索引
+     */
+    async loadChapter(chapterIdx : number) {
+      console.log(`[阅读器] 加载章节 idx=${chapterIdx}`)
+      this.loading = true
+      this.content = ''
+      this.paragraphs = []
+
+      try {
+        // 1. 先检查本地缓存
+        const cached = getCachedChapterContent(this.bookId, chapterIdx)
+        if (cached) {
+          console.log(`[阅读器] 使用缓存章节 idx=${chapterIdx}`)
+          this.setChapterContent(cached)
+          this.loading = false
+        } else {
+          // 2. 无缓存，从服务端获取 OSS 预签名 URL
+          const urlData = await getChapterUrl(this.bookId, chapterIdx)
+          this.currentTitle = urlData.title
+          this.prevChapterIdx = urlData.prevChapterIdx ?? null
+          this.nextChapterIdx = urlData.nextChapterIdx ?? null
+
+          // 3. 从 OSS 下载章节内容
+          console.log(`[阅读器] 从OSS下载章节 idx=${chapterIdx}`)
+          const content = await downloadChapterContent(urlData.ossPresignedUrl)
+
+          // 4. 缓存到本地
+          cacheChapterContent(this.bookId, chapterIdx, content)
+
+          this.setChapterContent(content)
+          this.loading = false
+        }
+
+        // 5. 预加载相邻章节（前后各2章）
+        this.preloadAdjacentChapters(chapterIdx)
+
+        // 6. 重置滚动位置
+        this.scrollTop = chapterIdx === this.currentChapterIdx ? (getLocalProgress(this.bookId)?.durChapterPos ?? 0) : 0
+
+      } catch (e : any) {
+        console.error('[阅读器] 加载章节失败', e.message)
+        this.loading = false
+        uni.showToast({ title: '章节加载失败', icon: 'error' })
+      }
+    },
+
+    /** 设置章节内容并解析段落 */
+    setChapterContent(content : string) {
+      this.content = content
+
+      // 按换行分割段落，过滤空段落，每段首部添加缩进
+      this.paragraphs = content
+        .split('\n')
+        .map((p : string) => p.trim())
+        .filter((p : string) => p.length > 0)
+
+      console.log(`[阅读器] 内容解析完成，共${this.paragraphs.length}段`)
+    },
+
+    /**
+     * 预加载相邻章节（后台异步）
+     * 避免翻页时等待，提升阅读流畅度
+     */
+    async preloadAdjacentChapters(currentIdx : number) {
+      const preloadList : number[] = []
+      // 预加载前2章和后2章（如果不在缓存中）
+      for (let i = currentIdx - 2; i <= currentIdx + 2; i++) {
+        if (i !== currentIdx && i >= 0 && i < this.totalChapters) {
+          const cached = getCachedChapterContent(this.bookId, i)
+          if (!cached) {
+            preloadList.push(i)
+          }
+        }
+      }
+
+      if (preloadList.length === 0) return
+
+      console.log(`[阅读器] 预加载章节 ${preloadList.join(',')}`)
+      try {
+        const batchData = await getBatchChapterUrls(this.bookId, preloadList)
+        // 并行下载所有预加载章节
+        const downloadPromises = (batchData.urls ?? []).map(async (urlData : any) => {
+          const content = await downloadChapterContent(urlData.ossPresignedUrl)
+          cacheChapterContent(this.bookId, urlData.chapterIdx, content)
+          console.log(`[阅读器] 预加载完成 idx=${urlData.chapterIdx}`)
+        })
+        await Promise.allSettled(downloadPromises)
+      } catch (e : any) {
+        console.warn('[阅读器] 预加载失败（不影响阅读）', e.message)
+      }
+    },
+
+    /** 上一章 */
+    async goPrevChapter() {
+      if (this.prevChapterIdx === null) {
+        uni.showToast({ title: '已是第一章', icon: 'none' })
+        return
+      }
+      this.reportProgressNow()
+      this.currentChapterIdx = this.prevChapterIdx
+      await this.loadChapter(this.currentChapterIdx)
+    },
+
+    /** 下一章 */
+    async goNextChapter() {
+      if (this.nextChapterIdx === null) {
+        uni.showToast({ title: '已是最后一章', icon: 'none' })
+        return
+      }
+      this.reportProgressNow()
+      this.currentChapterIdx = this.nextChapterIdx
+      await this.loadChapter(this.currentChapterIdx)
+    },
+
+    /** 滚动事件（节流上报进度） */
+    onScroll(e : any) {
+      this.currentScrollTop = e.detail.scrollTop
+
+      // 节流：距离上次上报超过30秒才上报
+      const now = Date.now()
+      if (now - this.lastReportTime >= PROGRESS_REPORT_INTERVAL) {
+        this.saveLocalProgressNow()
+        this.reportProgressToServer()
+        this.lastReportTime = now
+      }
+    },
+
+    /** 滚动到底部时自动加载下一章 */
+    onScrollToBottom() {
+      if (this.nextChapterIdx !== null) {
+        console.log('[阅读器] 滚动到底部，自动加载下一章')
+        this.goNextChapter()
+      }
+    },
+
+    /** 保存进度到本地（立即，不依赖网络） */
+    saveLocalProgressNow() {
+      saveLocalProgress(this.bookId, {
+        durChapterIndex: this.currentChapterIdx,
+        durChapterPos: this.currentScrollTop,
+        durChapterTitle: this.currentTitle,
+        updatedAt: Date.now()
+      })
+    },
+
+    /** 上报进度到服务端（允许失败） */
+    reportProgressToServer() {
+      reportProgress(
+        this.bookId,
+        this.currentChapterIdx,
+        this.currentScrollTop,
+        this.currentTitle,
+        this.sessionReadTime
+      ).then(() => {
+        this.sessionReadTime = 0  // 上报后重置本次计时
+        console.log('[阅读器] 进度上报成功')
+      }).catch((e : any) => {
+        console.warn('[阅读器] 进度上报失败（忽略）', e.message)
+      })
+    },
+
+    /** 立即上报进度（退出时调用） */
+    reportProgressNow() {
+      this.saveLocalProgressNow()
+      this.reportProgressToServer()
+    },
+
+    /** 开始阅读时长计时 */
+    startReadTimer() {
+      this.stopReadTimer()
+      this.readTimer = setInterval(() => {
+        this.sessionReadTime += 1
+      }, 1000)
+    },
+
+    /** 停止计时 */
+    stopReadTimer() {
+      if (this.readTimer) {
+        clearInterval(this.readTimer)
+        this.readTimer = null
+      }
+    },
+
+    /** 切换顶部/底部菜单显示 */
+    toggleMenu() {
+      this.menuVisible = !this.menuVisible
+    },
+
+    /** 返回上一页 */
+    goBack() {
+      this.reportProgressNow()
+      uni.navigateBack()
+    },
+
+    /** 跳转到章节列表 */
+    goChapterList() {
+      uni.navigateTo({
+        url: `/pages/chapters/chapters?bookId=${this.bookId}&bookName=${encodeURIComponent(this.bookName)}&chapterIdx=${this.currentChapterIdx}&totalChapters=${this.totalChapters}`
+      })
+    },
+
+    /** 调整字体大小 */
+    changeFontSize(delta : number) {
+      const newSize = this.fontSize + delta
+      if (newSize >= 24 && newSize <= 56) {
+        this.fontSize = newSize
+      }
+    }
+  }
+}
+</script>
+
+<style>
+/* 阅读器页面样式（全屏、沉浸式） */
+.reader-page {
+  position: relative;
+  min-height: 100vh;
+  transition: background-color 0.3s ease;
+}
+
+/* 顶部菜单 */
+.top-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  transform: translateY(-100%);
+  transition: transform 0.3s ease;
+  background: rgba(15, 15, 35, 0.95);
+  padding-top: env(safe-area-inset-top);
+}
+
+.top-bar.visible {
+  transform: translateY(0);
+}
+
+.top-bar-inner {
+  display: flex;
+  align-items: center;
+  padding: 20rpx 24rpx;
+}
+
+.back-btn { color: #e94560; font-size: 28rpx; flex-shrink: 0; }
+.chapter-title-top { flex: 1; color: #fff; font-size: 28rpx; text-align: center; padding: 0 20rpx; }
+.chapter-list-btn { color: #e94560; font-size: 28rpx; flex-shrink: 0; }
+
+/* 内容区域 */
+.content-scroll {
+  min-height: 100vh;
+  padding: 60rpx 40rpx;
+  box-sizing: border-box;
+}
+
+.content-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+
+.loading-spinner {
+  width: 60rpx;
+  height: 60rpx;
+  border: 4rpx solid #333;
+  border-top-color: #e94560;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-text { color: #888; font-size: 26rpx; margin-top: 24rpx; }
+
+.content-text { padding: 20rpx 0; }
+
+.content-chapter-title {
+  display: block;
+  font-size: 36rpx;
+  font-weight: bold;
+  color: #fff;
+  margin-bottom: 40rpx;
+  text-align: center;
+  line-height: 1.5;
+}
+
+.paragraph {
+  display: block;
+  line-height: 2;
+  color: #ddd;
+  margin-bottom: 24rpx;
+  text-indent: 2em;
+}
+
+/* 下一章提示 */
+.next-chapter-hint {
+  padding: 40rpx;
+  text-align: center;
+  border-top: 1rpx solid #2d2d4a;
+}
+
+.hint-text { color: #e94560; font-size: 26rpx; }
+
+.book-end { padding: 60rpx; text-align: center; }
+.end-text { color: #888; font-size: 28rpx; }
+
+/* 底部菜单 */
+.bottom-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  transform: translateY(100%);
+  transition: transform 0.3s ease;
+  background: rgba(15, 15, 35, 0.95);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.bottom-bar.visible {
+  transform: translateY(0);
+}
+
+/* 翻页按钮 */
+.nav-btns {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24rpx 40rpx;
+  border-bottom: 1rpx solid #2d2d4a;
+}
+
+.nav-btn { color: #e94560; font-size: 28rpx; }
+.nav-btn.disabled { color: #555; }
+.chapter-progress { color: #888; font-size: 24rpx; }
+
+/* 设置栏 */
+.settings-row {
+  display: flex;
+  align-items: center;
+  padding: 24rpx 40rpx;
+  gap: 30rpx;
+}
+
+.setting-btn {
+  color: #ccc;
+  font-size: 28rpx;
+  padding: 10rpx 24rpx;
+  border: 1rpx solid #555;
+  border-radius: 6rpx;
+}
+
+.bg-option {
+  width: 50rpx;
+  height: 50rpx;
+  border-radius: 50%;
+  border: 3rpx solid transparent;
+}
+
+.bg-option.active {
+  border-color: #e94560;
+}
+</style>

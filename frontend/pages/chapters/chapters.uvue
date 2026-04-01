@@ -1,0 +1,277 @@
+<template>
+  <!-- 章节列表页 - 展示书籍目录，支持跳转到任意章节 -->
+  <view class="chapters-page">
+
+    <!-- 书籍信息头部 -->
+    <view class="book-header">
+      <text class="book-title">{{ bookName }}</text>
+      <text class="chapter-count">共 {{ totalChapters }} 章</text>
+    </view>
+
+    <!-- 排序切换（正序/倒序） -->
+    <view class="sort-bar">
+      <text class="sort-label">章节顺序：</text>
+      <text
+        :class="['sort-btn', { active: !isReversed }]"
+        @click="isReversed = false"
+      >正序</text>
+      <text
+        :class="['sort-btn', { active: isReversed }]"
+        @click="isReversed = true"
+      >倒序</text>
+      <!-- 当前阅读位置 -->
+      <text class="reading-position" @click="jumpToCurrent">
+        读至第{{ currentChapterIdx + 1 }}章
+      </text>
+    </view>
+
+    <!-- 章节列表 -->
+    <scroll-view class="chapter-list" scroll-y :scroll-into-view="'chapter-' + currentChapterIdx">
+      <view
+        v-for="chapter in displayChapters"
+        :key="chapter.chapterIdx"
+        :id="'chapter-' + chapter.chapterIdx"
+        :class="['chapter-item', { current: chapter.chapterIdx === currentChapterIdx }]"
+        @click="onChapterClick(chapter)"
+      >
+        <view class="chapter-icon-area">
+          <!-- 当前阅读章节标记 -->
+          <view v-if="chapter.chapterIdx === currentChapterIdx" class="reading-dot" />
+        </view>
+        <text class="chapter-title">{{ chapter.title }}</text>
+        <text class="chapter-word-count" v-if="chapter.wordCount > 0">
+          {{ formatWordCount(chapter.wordCount) }}
+        </text>
+      </view>
+
+      <!-- 加载更多（分页加载） -->
+      <view v-if="hasMore" class="load-more" @click="loadMoreChapters">
+        <text class="load-more-text">加载更多章节...</text>
+      </view>
+    </scroll-view>
+
+    <!-- 加载中 -->
+    <view v-if="loading" class="loading-wrap">
+      <text class="loading-text">加载目录中...</text>
+    </view>
+
+  </view>
+</template>
+
+<script lang="uts">
+import { getChapterList } from '@/api/index.uts'
+import { getCachedChapterList, cacheChapterList } from '@/utils/cache.uts'
+
+export default {
+  data() {
+    return {
+      bookId: '',
+      bookName: '',
+      currentChapterIdx: 0,
+      chapters: [] as any[],
+      loading: true,
+      isReversed: false,
+      currentPage: 1,
+      hasMore: false,
+      totalChapters: 0,
+    }
+  },
+
+  computed: {
+    /** 根据排序显示章节（正序或倒序） */
+    displayChapters() : any[] {
+      return this.isReversed ? [...this.chapters].reverse() : this.chapters
+    }
+  },
+
+  onLoad(options : any) {
+    this.bookId = options.bookId ?? ''
+    this.bookName = decodeURIComponent(options.bookName ?? '')
+    this.currentChapterIdx = parseInt(options.chapterIdx ?? '0')
+    this.totalChapters = parseInt(options.totalChapters ?? '0')
+
+    console.log(`[章节列表] 加载 bookId=${this.bookId}, bookName=${this.bookName}`)
+    this.loadChapters()
+  },
+
+  methods: {
+    /**
+     * 加载章节列表
+     * 优先从本地缓存读取，缓存不存在则请求服务器
+     */
+    async loadChapters() {
+      this.loading = true
+
+      // 先尝试读取本地缓存
+      const cached = getCachedChapterList(this.bookId)
+      if (cached && cached.length > 0) {
+        this.chapters = cached
+        this.totalChapters = cached.length
+        this.loading = false
+        console.log(`[章节列表] 使用缓存，共${cached.length}章`)
+        return
+      }
+
+      // 缓存不存在，从服务器加载（分页加载所有章节）
+      await this.loadFromServer(1)
+      this.loading = false
+    },
+
+    /** 从服务器分页加载章节 */
+    async loadFromServer(page : number) {
+      try {
+        const data = await getChapterList(this.bookId, page, 200)
+        const newChapters = data.chapters ?? []
+
+        if (page === 1) {
+          this.chapters = newChapters
+        } else {
+          this.chapters = [...this.chapters, ...newChapters]
+        }
+
+        this.totalChapters = data.totalChapters
+        this.currentPage = page
+        this.hasMore = data.pagination.hasMore
+
+        console.log(`[章节列表] 加载第${page}页，共${newChapters.length}章，总${this.totalChapters}章`)
+
+        // 如果还有更多，自动继续加载（一次性加载完所有章节以便完整缓存）
+        if (data.pagination.hasMore) {
+          await this.loadFromServer(page + 1)
+        } else {
+          // 全部加载完毕，写入本地缓存
+          cacheChapterList(this.bookId, this.chapters)
+          console.log(`[章节列表] 全部章节加载完毕，已缓存 ${this.chapters.length} 章`)
+        }
+      } catch (e : any) {
+        console.error('[章节列表] 加载失败', e.message)
+      }
+    },
+
+    /** 手动加载更多（如果自动加载失败） */
+    async loadMoreChapters() {
+      await this.loadFromServer(this.currentPage + 1)
+    },
+
+    /** 点击章节 - 跳转到阅读器 */
+    onChapterClick(chapter : any) {
+      console.log(`[章节列表] 选择章节 idx=${chapter.chapterIdx}, title=${chapter.title}`)
+      uni.navigateTo({
+        url: `/pages/reader/reader?bookId=${this.bookId}&bookName=${encodeURIComponent(this.bookName)}&chapterIdx=${chapter.chapterIdx}&totalChapters=${this.totalChapters}`
+      })
+    },
+
+    /** 跳转到当前阅读章节 */
+    jumpToCurrent() {
+      const el = document.getElementById(`chapter-${this.currentChapterIdx}`)
+      el?.scrollIntoView()
+    },
+
+    /** 格式化字数显示 */
+    formatWordCount(count : number) : string {
+      if (count >= 10000) {
+        return `${(count / 10000).toFixed(1)}万字`
+      }
+      return `${count}字`
+    }
+  }
+}
+</script>
+
+<style>
+.chapters-page {
+  background: #0f0f23;
+  min-height: 100vh;
+}
+
+.book-header {
+  padding: 24rpx 30rpx;
+  background: #1a1a2e;
+  border-bottom: 1rpx solid #2d2d4a;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.book-title { color: #fff; font-size: 32rpx; font-weight: bold; flex: 1; }
+.chapter-count { color: #888; font-size: 24rpx; }
+
+/* 排序栏 */
+.sort-bar {
+  display: flex;
+  align-items: center;
+  padding: 16rpx 24rpx;
+  background: #13132b;
+  border-bottom: 1rpx solid #2d2d4a;
+}
+
+.sort-label { color: #888; font-size: 24rpx; }
+.sort-btn {
+  color: #888;
+  font-size: 24rpx;
+  padding: 8rpx 20rpx;
+  border-radius: 30rpx;
+  margin-left: 12rpx;
+}
+.sort-btn.active {
+  background: #e94560;
+  color: #fff;
+}
+
+.reading-position {
+  margin-left: auto;
+  color: #e94560;
+  font-size: 22rpx;
+}
+
+/* 章节列表 */
+.chapter-list { height: calc(100vh - 160rpx); }
+
+.chapter-item {
+  display: flex;
+  align-items: center;
+  padding: 24rpx 24rpx;
+  border-bottom: 1rpx solid #1a1a2e;
+}
+
+.chapter-item.current {
+  background: rgba(233, 69, 96, 0.1);
+}
+
+.chapter-icon-area { width: 30rpx; }
+.reading-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background: #e94560;
+}
+
+.chapter-title {
+  flex: 1;
+  color: #ccc;
+  font-size: 28rpx;
+  padding-left: 10rpx;
+}
+
+.chapter-item.current .chapter-title {
+  color: #e94560;
+  font-weight: bold;
+}
+
+.chapter-word-count { color: #666; font-size: 22rpx; }
+
+/* 加载更多 */
+.load-more {
+  padding: 30rpx;
+  text-align: center;
+}
+.load-more-text { color: #e94560; font-size: 26rpx; }
+
+/* 加载中 */
+.loading-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 60rpx;
+}
+.loading-text { color: #888; font-size: 26rpx; }
+</style>
